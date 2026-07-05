@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Plus, Camera, MapPin, Calendar, X, Trash2, Search, PawPrint } from "lucide-react";
+import { Plus, Camera, MapPin, Calendar, X, Trash2, Search, PawPrint, Settings } from "lucide-react";
 import { identifyAnimal } from "./identify.js";
 import {
-  getFamilyCode,
-  setFamilyCode,
+  loadFamilyCode,
+  storeFamilyCode,
   subscribeSpots,
   saveSpot,
   deleteSpot,
@@ -92,7 +92,8 @@ function todayISO() {
 }
 
 export default function App() {
-  const [familyCode, setFamilyCodeState] = useState(getFamilyCode());
+  // null = code wordt nog ingelezen (async, drie lagen); "" = echt geen code.
+  const [familyCode, setFamilyCodeState] = useState(null);
   const [entries, setEntries] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -100,6 +101,26 @@ export default function App() {
   const [filter, setFilter] = useState("alles");
   const [query, setQuery] = useState("");
   const [celebrate, setCelebrate] = useState(null);
+  const [settings, setSettings] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    loadFamilyCode().then((code) => {
+      if (active) setFamilyCodeState(code);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function applyFamilyCode(code) {
+    storeFamilyCode(code);
+    setEntries([]);
+    setLoaded(false);
+    setFilter("alles");
+    setQuery("");
+    setFamilyCodeState(code);
+  }
 
   useEffect(() => {
     if (!familyCode) return;
@@ -119,15 +140,12 @@ export default function App() {
     };
   }, [familyCode]);
 
+  if (familyCode === null) {
+    return <BootScreen />;
+  }
+
   if (!familyCode) {
-    return (
-      <FamilyGate
-        onSubmit={(code) => {
-          setFamilyCode(code);
-          setFamilyCodeState(code);
-        }}
-      />
-    );
+    return <FamilyGate onSubmit={applyFamilyCode} />;
   }
 
   const speciesSet = new Set(entries.map((e) => e.name.trim().toLowerCase()));
@@ -178,9 +196,19 @@ export default function App() {
 
       {/* Header */}
       <header style={{ background: C.forest, color: "#F4F7F2" }} className="px-5 pt-7 pb-6 rounded-b-3xl">
-        <div className="flex items-center gap-2 mb-4">
-          <PawPrint size={22} strokeWidth={2.4} />
-          <span className="disp" style={{ fontSize: 13, letterSpacing: 1.5, opacity: 0.85, textTransform: "uppercase" }}>Veldlogboek</span>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <PawPrint size={22} strokeWidth={2.4} />
+            <span className="disp" style={{ fontSize: 13, letterSpacing: 1.5, opacity: 0.85, textTransform: "uppercase" }}>Veldlogboek</span>
+          </div>
+          <button
+            onClick={() => setSettings(true)}
+            aria-label="Instellingen"
+            className="card-btn"
+            style={{ background: "none", border: "none", color: "#F4F7F2", opacity: 0.85, cursor: "pointer", padding: 4 }}
+          >
+            <Settings size={22} strokeWidth={2.2} />
+          </button>
         </div>
         <h1 className="disp" style={{ fontSize: 30, fontWeight: 700, lineHeight: 1.1 }}>{APP_TITLE}</h1>
         <p style={{ opacity: 0.85, marginTop: 4, fontSize: 15 }}>Welk beest heb jij gespot?</p>
@@ -250,6 +278,7 @@ export default function App() {
 
       {adding && <AddSheet onClose={() => setAdding(false)} onSave={addEntry} />}
       {detail && <DetailSheet entry={detail} photo={detail.photo} onClose={() => setDetail(null)} onDelete={() => removeEntry(detail.id)} />}
+      {settings && <SettingsSheet currentCode={familyCode} onClose={() => setSettings(false)} onSave={(code) => { setSettings(false); if (code !== familyCode) applyFamilyCode(code); }} />}
       {celebrate && <Celebration data={celebrate} />}
     </div>
   );
@@ -316,6 +345,61 @@ function FamilyGate({ onSubmit }) {
         )}
       </main>
     </div>
+  );
+}
+
+// Kort laadscherm terwijl de familiecode uit URL/IndexedDB/localStorage wordt
+// gelezen — voorkomt dat het codescherm even flitst terwijl er wél een code is.
+function BootScreen() {
+  return (
+    <div style={{ background: C.paper, color: C.soft, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, fontFamily: "'Nunito', ui-rounded, 'SF Pro Rounded', system-ui, sans-serif" }}>
+      <PawPrint size={34} strokeWidth={2.2} color={C.forest} />
+      <p style={{ fontSize: 15 }}>Logboek openen…</p>
+    </div>
+  );
+}
+
+// Instellingen: familiecode bekijken en wijzigen. Zelfde stijl en validatie
+// als het codescherm.
+function SettingsSheet({ currentCode, onClose, onSave }) {
+  const [code, setCode] = useState(currentCode);
+  const clean = code.trim().toLowerCase().replace(/\s+/g, "-");
+  const valid = clean.length >= 6;
+
+  return (
+    <Sheet onClose={onClose}>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="disp" style={{ fontSize: 22, fontWeight: 700 }}>Instellingen</h2>
+        <button onClick={onClose} aria-label="Sluiten"><X size={24} color={C.soft} /></button>
+      </div>
+
+      <Field label="Familiecode">
+        <input
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          autoCapitalize="none"
+          autoCorrect="off"
+          style={inp}
+        />
+        <p style={{ color: C.soft, fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
+          Met dezelfde code op de iPad en op papa&apos;s telefoon delen jullie één logboek. Minstens 6 tekens.
+        </p>
+      </Field>
+
+      <button
+        onClick={() => valid && onSave(clean)}
+        disabled={!valid}
+        className="disp card-btn"
+        style={{
+          width: "100%", marginTop: 4, padding: "15px", borderRadius: 16, border: "none",
+          fontSize: 17, fontWeight: 600, cursor: valid ? "pointer" : "default",
+          background: valid ? C.forest : C.line, color: valid ? "#fff" : C.soft,
+        }}
+      >
+        Opslaan
+      </button>
+      {!valid && <p style={{ textAlign: "center", color: C.soft, fontSize: 13, marginTop: 8 }}>De code moet minstens 6 tekens lang zijn.</p>}
+    </Sheet>
   );
 }
 
