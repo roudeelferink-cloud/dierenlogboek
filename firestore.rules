@@ -1,0 +1,33 @@
+rules_version = '2';
+
+// Toegang is beperkt tot wie de familiecode kent: de code zit in het pad en
+// is niet op te sommen (list op /families is verboden). Documenten worden
+// gevalideerd op vorm en grootte zodat de database niet te misbruiken is
+// als vrije opslag. Publiceer via Firebase Console → Firestore → Regels.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /families/{familyCode}/spots/{spotId} {
+      allow read: if familyCode.size() >= 6;
+      allow delete: if familyCode.size() >= 6;
+      allow create, update: if familyCode.size() >= 6
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 200
+        && request.resource.data.group is string
+        && request.resource.data.group.size() <= 20
+        && request.resource.data.date is string
+        && request.resource.data.date.size() <= 20
+        // Foto inline als base64: past ruim binnen de 1 MB documentlimiet.
+        && (!('photo' in request.resource.data)
+            || request.resource.data.photo == null
+            || (request.resource.data.photo is string
+                && request.resource.data.photo.size() < 700000));
+    }
+
+    // Alles buiten het spots-pad blijft dicht.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
