@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Echte config met Firebase-keys en Worker-URL — nooit committen
+src/config.js
+
+# Wrangler lokale state
+worker/.wrangler/
+worker/node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
