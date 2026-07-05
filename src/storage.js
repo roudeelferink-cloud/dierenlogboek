@@ -5,22 +5,105 @@ import { firebaseConfig } from "./config.js";
 
 export const hasFirebase = !!(firebaseConfig && firebaseConfig.projectId);
 
+// ── Familiecode: drie lagen, omdat iOS opslag van standalone-PWA's kan
+// wissen. De URL-parameter is de garantie (zit in de beginscherm-
+// snelkoppeling), IndexedDB is duurzamer dan localStorage, en localStorage
+// blijft als derde kopie. Bij lezen herstellen we ontbrekende lagen.
 const CODE_KEY = "dierenlogboek:familiecode";
+const FAM_PARAM = "fam";
 
-export function getFamilyCode() {
+const IDB_NAME = "dierenlogboek-kv";
+const IDB_STORE = "kv";
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbGet(key) {
   try {
-    return localStorage.getItem(CODE_KEY) || "";
+    const db = await idbOpen();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result || "");
+      req.onerror = () => reject(req.error);
+    });
   } catch {
     return "";
   }
 }
 
-export function setFamilyCode(code) {
+async function idbSet(key, value) {
   try {
-    localStorage.setItem(CODE_KEY, code);
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.error("IndexedDB-schrijf mislukt:", e);
+  }
+}
+
+function readUrlCode() {
+  try {
+    return (new URL(window.location.href).searchParams.get(FAM_PARAM) || "").trim().toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function writeUrlCode(code) {
+  try {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(FAM_PARAM) === code) return;
+    url.searchParams.set(FAM_PARAM, code);
+    window.history.replaceState(null, "", url);
   } catch (e) {
     console.error(e);
   }
+}
+
+/**
+ * Schrijft de familiecode naar alle drie de lagen en vraagt duurzame opslag
+ * aan. Fouten per laag zijn niet fataal — de andere lagen vangen het op.
+ */
+export async function storeFamilyCode(code) {
+  writeUrlCode(code);
+  try {
+    localStorage.setItem(CODE_KEY, code);
+  } catch (e) {
+    console.error("localStorage-schrijf mislukt:", e);
+  }
+  await idbSet(CODE_KEY, code);
+  try {
+    navigator.storage?.persist?.().catch(() => {});
+  } catch {}
+}
+
+/**
+ * Leest de familiecode met prioriteit URL → IndexedDB → localStorage en
+ * herstelt ontbrekende kopieën (inclusief de URL, zodat "Zet op beginscherm"
+ * de code in de snelkoppeling meeneemt).
+ */
+export async function loadFamilyCode() {
+  let code = readUrlCode();
+  if (!code) code = await idbGet(CODE_KEY);
+  if (!code) {
+    try {
+      code = localStorage.getItem(CODE_KEY) || "";
+    } catch {
+      code = "";
+    }
+  }
+  if (code) await storeFamilyCode(code);
+  return code;
 }
 
 // ── Firestore-backend ──
