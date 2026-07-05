@@ -2,7 +2,6 @@
   "name": "Siems Dierenlogboek",
   "short_name": "Dierenlogboek",
   "description": "Veldlogboek voor gespotte dieren",
-  "start_url": "/dierenlogboek/",
   "scope": "/dierenlogboek/",
   "display": "standalone",
   "orientation": "portrait",
