@@ -1,0 +1,11 @@
+# Cloudflare Worker: proxy voor fotoherkenning naar de Anthropic-API.
+# Deploy:   npx wrangler deploy
+# Secret:   npx wrangler secret put ANTHROPIC_API_KEY
+name = "dierenlogboek-herkenning"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+[vars]
+# Komma-gescheiden lijst van toegestane origins (CORS). Vervang GEBRUIKERSNAAM
+# door je GitHub-gebruikersnaam. localhost staat erbij voor lokaal testen.
+ALLOWED_ORIGINS = "https://GEBRUIKERSNAAM.github.io,http://localhost:5173,http://localhost:4173"
