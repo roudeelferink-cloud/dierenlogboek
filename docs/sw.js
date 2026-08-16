@@ -2,13 +2,13 @@
  * Versie-gebaseerde cache: elke build krijgt een nieuwe cache-naam, oude
  * caches worden bij activate opgeruimd. skipWaiting + clients.claim zorgen
  * dat een nieuwe versie direct actief wordt en nooit blijft hangen. */
-const VERSION = "mr7xchlt";
+const VERSION = "msw2672y";
 const BASE = "/dierenlogboek/";
 const CACHE = "dierenlogboek-" + VERSION;
 const FONT_CACHE = "dierenlogboek-fonts";
 const PRECACHE = [
   "/dierenlogboek/assets/index-Cf05VYgr.css",
-  "/dierenlogboek/assets/index-fTyG06NW.js",
+  "/dierenlogboek/assets/index-DlOwP-bS.js",
   "/dierenlogboek/assets/index.esm-CyIkSDdc.js",
   "/dierenlogboek/assets/index.esm-DnoN5pbu.js",
   "/dierenlogboek/assets/index.esm2017-Cp8kYHkS.js",

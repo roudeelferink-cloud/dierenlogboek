@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Plus, Camera, MapPin, Calendar, X, Trash2, Search, PawPrint, Settings } from "lucide-react";
+import { Plus, Camera, Images, MapPin, Calendar, X, Trash2, Search, PawPrint, Settings } from "lucide-react";
 import { identifyAnimal } from "./identify.js";
 import {
   loadFamilyCode,
@@ -48,36 +48,144 @@ const COMPRESS_STEPS = [
   [320, 0.36],
 ];
 
-function loadImage(file) {
+// Groter dan dit laten we niet op het canvas los: zulke foto's maakt een
+// telefoon niet en het decoderen zou de tab kunnen laten omvallen.
+const MAX_SOURCE_BYTES = 40 * 1024 * 1024;
+
+// Fout met een melding die we zo aan Siem durven te laten zien.
+class PhotoError extends Error {}
+
+// Foto's uit de fotobibliotheek staan vaak gekanteld in de pixels; pas de
+// EXIF-orientatievlag zet ze rechtop. De ene browser past die vlag zelf toe,
+// de andere niet. Daarom knippen we het Exif-blok uit de JPEG — dan draait
+// niemand stiekem mee — en zetten we de foto zelf recht op het canvas.
+function findExifSegment(view) {
+  if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return null; // geen JPEG
+  let offset = 2;
+  while (offset + 4 <= view.byteLength) {
+    if (view.getUint8(offset) !== 0xff) return null; // geen geldige markerketen
+    const marker = view.getUint16(offset);
+    if (marker === 0xffda || marker === 0xffd9) return null; // beelddata begint
+    if (marker === 0xff01 || (marker >= 0xffd0 && marker <= 0xffd8)) {
+      offset += 2; // markers zonder inhoud
+      continue;
+    }
+    const size = view.getUint16(offset + 2);
+    if (size < 2) return null;
+    const isExif =
+      marker === 0xffe1 &&
+      offset + 10 <= view.byteLength &&
+      view.getUint32(offset + 4) === 0x45786966 && // "Exif"
+      view.getUint16(offset + 8) === 0x0000;
+    if (isExif) return { start: offset, length: size + 2, tiff: offset + 10 };
+    offset += 2 + size;
+  }
+  return null;
+}
+
+// Leest tag 0x0112 (Orientation) uit de eerste IFD van het TIFF-blok.
+function readOrientation(view, tiff) {
+  if (tiff + 8 > view.byteLength) return 1;
+  const byteOrder = view.getUint16(tiff);
+  if (byteOrder !== 0x4949 && byteOrder !== 0x4d4d) return 1;
+  const little = byteOrder === 0x4949;
+  if (view.getUint16(tiff + 2, little) !== 42) return 1;
+  const entries = tiff + view.getUint32(tiff + 4, little);
+  if (entries + 2 > view.byteLength) return 1;
+  const count = view.getUint16(entries, little);
+  for (let i = 0; i < count; i++) {
+    const entry = entries + 2 + i * 12;
+    if (entry + 12 > view.byteLength) break;
+    if (view.getUint16(entry, little) === 0x0112) {
+      const value = view.getUint16(entry + 8, little);
+      return value >= 1 && value <= 8 ? value : 1;
+    }
+  }
+  return 1;
+}
+
+function stripSegment(bytes, start, length) {
+  const out = new Uint8Array(bytes.length - length);
+  out.set(bytes.subarray(0, start), 0);
+  out.set(bytes.subarray(start + length), start);
+  return out;
+}
+
+// w/h zijn de geschaalde bronafmetingen; bij een kwartslag (5–8) is het canvas
+// gedraaid en staan breedte en hoogte dus verwisseld.
+function drawOriented(ctx, img, orientation, w, h) {
+  switch (orientation) {
+    case 2: ctx.transform(-1, 0, 0, 1, w, 0); break;
+    case 3: ctx.transform(-1, 0, 0, -1, w, h); break;
+    case 4: ctx.transform(1, 0, 0, -1, 0, h); break;
+    case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
+    case 6: ctx.transform(0, 1, -1, 0, h, 0); break;
+    case 7: ctx.transform(0, -1, -1, 0, h, w); break;
+    case 8: ctx.transform(0, -1, 1, 0, 0, w); break;
+    default: break;
+  }
+  ctx.drawImage(img, 0, 0, w, h);
+}
+
+function loadImageFromBlob(blob) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = reject;
-      img.src = e.target.result;
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new PhotoError("Deze foto kon niet worden geopend. Probeer een andere."));
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    img.src = url;
   });
 }
 
+// Eén gedeelde route voor de camera én de fotobibliotheek: controleren,
+// rechtzetten en comprimeren tot de foto in een Firestore-document past.
 async function compressImage(file) {
-  const img = await loadImage(file);
-  let dataUrl = null;
+  if (!file.type || !file.type.startsWith("image/")) {
+    throw new PhotoError("Dit is geen foto. Kies een afbeelding uit je bibliotheek.");
+  }
+  if (file.size > MAX_SOURCE_BYTES) {
+    throw new PhotoError("Deze foto is te groot om te verwerken. Kies een kleinere foto.");
+  }
+
+  let blob = file;
+  let orientation = 1;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const view = new DataView(bytes.buffer);
+    const exif = findExifSegment(view);
+    if (exif) {
+      orientation = readOrientation(view, exif.tiff);
+      if (orientation > 1) {
+        blob = new Blob([stripSegment(bytes, exif.start, exif.length)], { type: file.type });
+      }
+    }
+  } catch {
+    // Niets te lezen: dan laten we de browser de foto op zijn eigen manier tonen.
+    blob = file;
+    orientation = 1;
+  }
+
+  const img = await loadImageFromBlob(blob);
+  const sw = img.naturalWidth || img.width;
+  const sh = img.naturalHeight || img.height;
+  if (!sw || !sh) throw new PhotoError("Deze foto kon niet worden verwerkt. Probeer een andere.");
+
+  const swap = orientation >= 5;
   for (const [maxDim, quality] of COMPRESS_STEPS) {
-    let { width, height } = img;
-    const scale = Math.min(1, maxDim / Math.max(width, height));
-    width = Math.round(width * scale);
-    height = Math.round(height * scale);
+    const scale = Math.min(1, maxDim / Math.max(sw, sh));
+    const w = Math.max(1, Math.round(sw * scale));
+    const h = Math.max(1, Math.round(sh * scale));
     const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-    dataUrl = canvas.toDataURL("image/jpeg", quality);
+    canvas.width = swap ? h : w;
+    canvas.height = swap ? w : h;
+    drawOriented(canvas.getContext("2d"), img, orientation, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
     if (dataUrl.length <= MAX_PHOTO_BYTES) return dataUrl;
   }
-  return dataUrl;
+  throw new PhotoError("Deze foto is te groot om te verwerken. Kies een kleinere foto.");
 }
 
 const MONTHS = ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
@@ -489,18 +597,26 @@ function AddSheet({ onClose, onSave }) {
   const [identifying, setIdentifying] = useState(false);
   const [idError, setIdError] = useState(false);
   const [facts, setFacts] = useState([]);
-  const fileRef = useRef();
+  const [photoError, setPhotoError] = useState("");
+  const cameraRef = useRef();
+  const libraryRef = useRef();
 
+  // Camera én fotobibliotheek lopen door precies dezelfde flow: comprimeren,
+  // rechtzetten en meteen laten herkennen.
   async function pickPhoto(e) {
     const f = e.target.files?.[0];
+    e.target.value = ""; // dezelfde foto nog een keer kiezen moet ook werken
     if (!f) return;
-    setBusy(true); setIdError(false);
+    setBusy(true); setIdError(false); setPhotoError("");
     try {
       const url = await compressImage(f);
       setPhoto(url);
       setBusy(false);
       runIdentify(url);
-    } catch { setBusy(false); }
+    } catch (err) {
+      setBusy(false);
+      setPhotoError(err instanceof PhotoError ? err.message : "Deze foto kon niet worden verwerkt. Probeer een andere.");
+    }
   }
 
   // Vult soort, groep en weetjes automatisch in. Wat Siem al zelf typte blijft staan.
@@ -531,18 +647,24 @@ function AddSheet({ onClose, onSave }) {
         <button onClick={onClose} aria-label="Sluiten"><X size={24} color={C.soft} /></button>
       </div>
 
-      <Field label="Maak een foto — Claude herkent het dier vanzelf">
+      <Field label="Zet er een foto bij — Claude herkent het dier vanzelf">
         {photo ? (
           <div style={{ position: "relative" }}>
             <img src={photo} alt="voorbeeld" style={{ width: "100%", borderRadius: 16, maxHeight: 220, objectFit: "cover" }} />
-            <button onClick={() => { setPhoto(null); setFacts([]); setIdError(false); }} aria-label="Foto verwijderen" style={{ position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,.55)", color: "#fff", border: "none", borderRadius: 999, width: 32, height: 32, cursor: "pointer" }}><X size={18} /></button>
+            <button onClick={() => { setPhoto(null); setFacts([]); setIdError(false); setPhotoError(""); }} aria-label="Foto verwijderen" style={{ position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,.55)", color: "#fff", border: "none", borderRadius: 999, width: 32, height: 32, cursor: "pointer" }}><X size={18} /></button>
           </div>
         ) : (
-          <button onClick={() => fileRef.current?.click()} className="card-btn" style={{ width: "100%", padding: "22px", borderRadius: 16, border: `2px dashed ${C.forest}`, background: `${C.forest}0d`, color: C.forest, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: "pointer", fontSize: 15, fontWeight: 700 }}>
-            <Camera size={20} /> {busy ? "Bezig…" : "Foto kiezen of maken"}
-          </button>
+          <div className="flex gap-2">
+            <PhotoButton icon={<Camera size={20} />} label="Foto maken" disabled={busy} onClick={() => cameraRef.current?.click()} />
+            <PhotoButton icon={<Images size={20} />} label="Uit bibliotheek" disabled={busy} onClick={() => libraryRef.current?.click()} />
+          </div>
         )}
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={pickPhoto} style={{ display: "none" }} />
+        {/* Twee aparte inputs: mét capture opent iOS meteen de camera, zónder
+            capture komt de fotobibliotheek. Beide gaan door pickPhoto. */}
+        <input ref={cameraRef} type="file" accept="image/*" capture="environment" onChange={pickPhoto} style={{ display: "none" }} />
+        <input ref={libraryRef} type="file" accept="image/*" onChange={pickPhoto} style={{ display: "none" }} />
+        {busy && <p style={{ color: C.soft, fontSize: 13.5, marginTop: 8 }}>Foto klaarmaken…</p>}
+        {photoError && <p style={{ color: "#C0392B", fontSize: 13.5, marginTop: 8, lineHeight: 1.45 }}>{photoError}</p>}
       </Field>
 
       {(identifying || idError || facts.length > 0) && (
@@ -659,6 +781,26 @@ function Celebration({ data }) {
         <div style={{ fontSize: 15, color: C.soft, marginTop: 4, textTransform: "capitalize" }}>{data.name} toegevoegd aan je logboek</div>
       </div>
     </div>
+  );
+}
+
+// De twee gelijkwaardige manieren om aan een foto te komen: camera of
+// fotobibliotheek. Zelfde stippellijn-stijl als de oude enkele knop.
+function PhotoButton({ icon, label, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="card-btn"
+      style={{
+        flex: 1, padding: "18px 8px", borderRadius: 16, border: `2px dashed ${C.forest}`,
+        background: `${C.forest}0d`, color: C.forest, display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", gap: 6, fontSize: 14.5, fontWeight: 700,
+        fontFamily: "inherit", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.55 : 1,
+      }}
+    >
+      {icon} {label}
+    </button>
   );
 }
 
